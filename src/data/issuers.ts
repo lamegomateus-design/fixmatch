@@ -1,0 +1,88 @@
+import type { Issuer } from "@/types";
+
+export const issuers: Issuer[] = [
+  {
+    id: "isr-1",
+    name: "Banco Genial S.A.",
+    cnpj: "45.246.410/0001-55",
+    sector: "Bancário",
+    rating: "AA+",
+  },
+  {
+    id: "isr-2",
+    name: "Banco BMG",
+    cnpj: "61.186.680/0001-74",
+    sector: "Bancário",
+    rating: "AA-",
+  },
+  {
+    id: "isr-3",
+    name: "Vale S.A.",
+    cnpj: "33.592.510/0001-54",
+    sector: "Mineração",
+    rating: "AAA",
+  },
+  {
+    id: "isr-4",
+    name: "Petrobras",
+    cnpj: "33.000.167/0001-01",
+    sector: "Óleo & Gás",
+    rating: "AAA",
+  },
+  {
+    id: "isr-5",
+    name: "JBS S.A.",
+    cnpj: "02.916.265/0001-60",
+    sector: "Alimentos",
+    rating: "AA",
+  },
+  {
+    id: "isr-6",
+    name: "Klabin S.A.",
+    cnpj: "89.637.490/0001-45",
+    sector: "Papel & Celulose",
+    rating: "AA",
+  },
+  {
+    id: "isr-7",
+    name: "Cyrela Brazil Realty",
+    cnpj: "73.178.600/0001-18",
+    sector: "Construção",
+    rating: "A+",
+  },
+  {
+    id: "isr-8",
+    name: "Eztec Empreendimentos",
+    cnpj: "08.312.229/0001-73",
+    sector: "Construção",
+    rating: "A",
+  },
+  {
+    id: "isr-9",
+    name: "Rumo S.A.",
+    cnpj: "02.387.241/0001-60",
+    sector: "Logística",
+    rating: "AA-",
+  },
+  {
+    id: "isr-10",
+    name: "Tesouro Nacional",
+    cnpj: "00.394.460/0001-41",
+    sector: "Governo",
+    rating: "AAA",
+  },
+  {
+    id: "isr-11",
+    name: "Banco Daycoval",
+    cnpj: "62.232.889/0001-90",
+    sector: "Bancário",
+    rating: "AA",
+  },
+  {
+    id: "isr-12",
+    name: "Suzano S.A.",
+    cnpj: "16.404.287/0001-55",
+    sector: "Papel & Celulose",
+    rating: "AA+",
+  },
+];

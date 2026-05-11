@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 150 30% 4%;
+    --foreground: 140 15% 92%;
+
+    --card: 150 28% 6%;
+    --card-foreground: 140 15% 92%;
+
+    --popover: 150 30% 7%;
+    --popover-foreground: 140 15% 92%;
+
+    --primary: 142 70% 45%;
+    --primary-foreground: 150 30% 4%;
+
+    --secondary: 150 20% 12%;
+    --secondary-foreground: 140 15% 92%;
+
+    --muted: 150 15% 12%;
+    --muted-foreground: 140 8% 55%;
+
+    --accent: 142 50% 22%;
+    --accent-foreground: 140 60% 90%;
+
+    --destructive: 0 75% 50%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 150 15% 14%;
+    --input: 150 15% 12%;
+    --ring: 142 70% 45%;
+
+    --radius: 0.5rem;
+
+    --positive: 142 70% 48%;
+    --negative: 0 75% 58%;
+    --warning: 38 92% 55%;
+    --info: 199 89% 55%;
+
+    --terminal-bg: 150 32% 3%;
+    --terminal-panel: 150 28% 6%;
+    --terminal-border: 150 18% 14%;
+    --terminal-green: 142 80% 48%;
+    --terminal-dim: 140 10% 40%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1, "tnum" 1;
+  }
+
+  body {
+    background:
+      radial-gradient(ellipse 80% 60% at 50% -20%, hsl(var(--terminal-green) / 0.08), transparent),
+      radial-gradient(ellipse 60% 50% at 100% 100%, hsl(var(--terminal-green) / 0.04), transparent),
+      hsl(var(--background));
+    min-height: 100vh;
+  }
+}
+
+@layer utilities {
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(hsl(var(--terminal-border) / 0.4) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--terminal-border) / 0.4) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--terminal-border));
+    border-radius: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--terminal-green) / 0.4);
+  }
+}
