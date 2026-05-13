@@ -1,36 +1,70 @@
-import type {
-  BuyerSimulationInput,
-  BuyerSimulationOutput,
-  Offer,
-} from "@/types";
+/**
+ * Legacy shim. Mantém os símbolos antigos do `lib/finance` para que a
+ * UI continue compilando enquanto migramos os consumers para o novo
+ * engine modular em `lib/finance/*`. Quando todos migrarem, remover
+ * este arquivo.
+ *
+ * Mudanças relevantes:
+ *   - CDI_ANNUAL agora bate com CDI_ANUAL = 14,40% a.a. (single source).
+ *   - businessDaysBetween agora conta dias úteis reais via feriados ANBIMA.
+ *   - computeImpliedYield delega para `calcularYieldImplicito_PreFixado`
+ *     (mantém a fórmula original — pré base 252 — para PU/face genéricos).
+ *   - computeMatchScore mantém o contrato `(offer) => number` usando o
+ *     novo motor com demanda neutra.
+ */
 
-export const CDI_ANNUAL = 0.1115;
-export const BUSINESS_DAYS_YEAR = 252;
-export const CALENDAR_DAYS_YEAR = 365;
+import type { BuyerSimulationInput, BuyerSimulationOutput, Offer } from "@/types";
+import {
+  CDI_ANUAL,
+  DU_ANO,
+  DC_ANO,
+  diasUteis,
+  diasCorridos,
+  calcularYieldImplicito_PreFixado,
+  calcularMatchScore,
+} from "./finance/index";
 
+export {
+  // Re-exporta o engine novo (estimula migração progressiva)
+  CDI_ANUAL,
+  DU_ANO,
+  DC_ANO,
+  diasUteis,
+  diasCorridos,
+} from "./finance/index";
+
+// ── Constantes legadas ──────────────────────────────────────────────
+/** @deprecated use CDI_ANUAL */
+export const CDI_ANNUAL = CDI_ANUAL;
+/** @deprecated use DU_ANO */
+export const BUSINESS_DAYS_YEAR = DU_ANO;
+/** @deprecated use DC_ANO */
+export const CALENDAR_DAYS_YEAR = DC_ANO;
+
+// ── Datas ───────────────────────────────────────────────────────────
+/** @deprecated use diasCorridos */
 export function daysBetween(start: Date | string, end: Date | string): number {
-  const s = typeof start === "string" ? new Date(start) : start;
-  const e = typeof end === "string" ? new Date(end) : end;
-  return Math.max(0, Math.round((e.getTime() - s.getTime()) / 86400000));
+  return diasCorridos(start, end);
 }
 
+/** @deprecated use diasUteis (agora considera feriados ANBIMA). */
 export function businessDaysBetween(
   start: Date | string,
   end: Date | string,
 ): number {
-  const totalDays = daysBetween(start, end);
-  return Math.round((totalDays / CALENDAR_DAYS_YEAR) * BUSINESS_DAYS_YEAR);
+  return diasUteis(start, end);
 }
 
+// ── Cálculo financeiro legado ───────────────────────────────────────
+/** @deprecated use calcularYieldImplicito_PreFixado/_CDI/_IPCA conforme o indexador. */
 export function computeImpliedYield(
   purchasePU: number,
   faceValue: number,
   maturity: string | Date,
   from: Date | string = new Date(),
 ): number {
-  const du = Math.max(1, businessDaysBetween(from, maturity));
-  const ratio = faceValue / purchasePU;
-  return Math.pow(ratio, BUSINESS_DAYS_YEAR / du) - 1;
+  const du = Math.max(1, diasUteis(from, maturity));
+  return calcularYieldImplicito_PreFixado(purchasePU, faceValue, du);
 }
 
 export function computeAgioDeagio(
@@ -49,6 +83,7 @@ export function computeDiscountPct(
   return (faceValue - offeredPU) / faceValue;
 }
 
+/** @deprecated use calcularYieldLiquido com tipo de ativo + perfil. */
 export function netReturnAfterTax(
   grossReturn: number,
   taxBracket: number,
@@ -56,11 +91,12 @@ export function netReturnAfterTax(
   return grossReturn * (1 - taxBracket);
 }
 
-export function ratioVsCDI(rate: number, cdi: number = CDI_ANNUAL): number {
+export function ratioVsCDI(rate: number, cdi: number = CDI_ANUAL): number {
   if (!cdi) return 0;
   return rate / cdi;
 }
 
+// ── Formatadores ────────────────────────────────────────────────────
 export function formatPercent(value: number, fractionDigits = 2): string {
   return `${(value * 100).toFixed(fractionDigits)}%`;
 }
@@ -101,11 +137,17 @@ export function formatDateTimeBR(value: string | Date): string {
   }).format(d);
 }
 
+// ── Buyer simulation legacy ─────────────────────────────────────────
+/**
+ * @deprecated A nova implementação do simulador vive em
+ * `components/simulator/simulator.tsx` e usa direto o engine modular.
+ * Mantemos para compatibilidade com chamadas existentes.
+ */
 export function runBuyerSimulation(
   input: BuyerSimulationInput,
 ): BuyerSimulationOutput {
   const today = new Date();
-  const days = daysBetween(today, input.maturity);
+  const days = diasCorridos(today, input.maturity);
   const annualizedYield = computeImpliedYield(
     input.purchasePU,
     input.faceValue,
@@ -117,8 +159,7 @@ export function runBuyerSimulation(
   const vsCDI = ratioVsCDI(annualizedYield);
   const breakEvenPrice =
     input.faceValue /
-    Math.pow(1 + CDI_ANNUAL, businessDaysBetween(today, input.maturity) / BUSINESS_DAYS_YEAR);
-
+    Math.pow(1 + CDI_ANUAL, diasUteis(today, input.maturity) / DU_ANO);
   return {
     grossReturn,
     netReturn,
@@ -130,11 +171,7 @@ export function runBuyerSimulation(
   };
 }
 
-/**
- * Match score 0–100. Buyer profile (preferred type, max maturity, min yield)
- * compared to the offer. Highlights how attractive the offer is relative
- * to the buyer's target.
- */
+// ── Match score legacy ──────────────────────────────────────────────
 export interface MatchProfile {
   assetType?: string;
   maxMaturity?: string;
@@ -143,58 +180,17 @@ export interface MatchProfile {
   preferredRating?: string[];
 }
 
-export function computeMatchScore(
-  offer: Offer,
-  profile: MatchProfile = {
-    minYield: 0.13,
-    preferredRating: ["AAA", "AA+", "AA", "AA-", "A+"],
-  },
-): number {
-  let score = 50;
-
-  // Yield component (up to +30)
-  if (profile.minYield) {
-    const delta = offer.offeredRate - profile.minYield;
-    score += Math.max(-20, Math.min(30, delta * 600));
-  }
-
-  // Deságio component (up to +15)
-  if (offer.agioDeagioPct < 0) {
-    score += Math.min(15, Math.abs(offer.agioDeagioPct) * 200);
-  } else {
-    score -= Math.min(10, offer.agioDeagioPct * 200);
-  }
-
-  // Rating component (up to +10)
-  if (
-    profile.preferredRating &&
-    profile.preferredRating.includes(offer.asset.issuer.rating)
-  ) {
-    score += 10;
-  } else {
-    score -= 5;
-  }
-
-  // Asset type match
-  if (profile.assetType && profile.assetType === offer.asset.type) {
-    score += 8;
-  }
-
-  // Maturity preference
-  if (profile.maxMaturity) {
-    const maxDate = new Date(profile.maxMaturity).getTime();
-    const matDate = new Date(offer.asset.maturity).getTime();
-    if (matDate <= maxDate) score += 5;
-    else score -= 5;
-  }
-
-  // Urgency: high urgency → small bonus (better deal opportunity)
-  if (offer.urgency === "Alta") score += 4;
-  else if (offer.urgency === "Média") score += 1;
-
-  return Math.max(0, Math.min(100, Math.round(score)));
+/**
+ * @deprecated use calcularMatchScore(offer, demanda) — assinatura nova
+ * com componentes ponderados (40/25/20/10/5). Esta versão delega ao
+ * motor novo com demanda neutra para preservar o livro atual.
+ */
+export function computeMatchScore(offer: Offer, _profile?: MatchProfile): number {
+  // Demanda neutra; UI antiga não tem demanda concreta no contexto.
+  return calcularMatchScore(offer, {});
 }
 
+// ── UI helpers (sem dependência financeira) ─────────────────────────
 export function urgencyColor(urgency: Offer["urgency"]): string {
   switch (urgency) {
     case "Alta":

@@ -5,6 +5,12 @@ import { Bell, Search, UserCircle2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  CDI_ANUAL,
+  IPCA_ANUAL,
+  SELIC_ANUAL,
+} from "@/lib/finance/constants";
+import { formatPercent } from "@/lib/finance";
 
 export function Topbar() {
   return (
@@ -28,17 +34,17 @@ export function Topbar() {
           <div className="hidden md:flex items-center gap-3 px-3 py-1 rounded-md border border-terminal-border bg-terminal-panel/60 text-[11px] font-mono tabular-nums">
             <div className="flex items-center gap-1.5">
               <span className="text-muted-foreground">CDI</span>
-              <span className="text-primary">11,15%</span>
+              <span className="text-primary">{formatPercent(CDI_ANUAL)}</span>
             </div>
             <span className="text-terminal-border">|</span>
             <div className="flex items-center gap-1.5">
               <span className="text-muted-foreground">IPCA</span>
-              <span className="text-foreground">4,42%</span>
+              <span className="text-foreground">{formatPercent(IPCA_ANUAL)}</span>
             </div>
             <span className="text-terminal-border">|</span>
             <div className="flex items-center gap-1.5">
               <span className="text-muted-foreground">SELIC</span>
-              <span className="text-foreground">11,25%</span>
+              <span className="text-foreground">{formatPercent(SELIC_ANUAL)}</span>
             </div>
           </div>
           <Button variant="ghost" size="icon" className="relative">

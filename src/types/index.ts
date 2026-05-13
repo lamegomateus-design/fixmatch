@@ -30,7 +30,19 @@ export type OfferStatus =
   | "Cancelada"
   | "Pendente";
 
+/**
+ * Legacy label used in UI components. The canonical code used by the
+ * finance engine is `Indexador` (below). "Selic" is rendered in the UI
+ * for Tesouro Selic / LFT but treated as %CDI = 100% by the math layer.
+ */
 export type IndexerType = "Pré" | "CDI" | "IPCA+" | "Selic";
+
+/** Canonical code consumed by the finance engine. */
+export type Indexador = "PRE" | "CDI" | "IPCA";
+
+export type Perfil = "PF" | "PJ";
+
+export type FonteCurva = "DI_B3" | "ANBIMA";
 
 export interface Issuer {
   id: string;
@@ -53,6 +65,27 @@ export interface Asset {
   indexer: IndexerType;
   couponFreq?: "mensal" | "semestral" | "anual" | "no vencimento";
   isin?: string;
+  // ── New canonical / derived fields (additive) ─────────────────────
+  /** Canonical indexador code. UI keeps reading `indexer`. */
+  indexerCode?: Indexador;
+  /** True for Lei 12.431 incentivada debêntures (IR isento PF). */
+  isIncentivada?: boolean;
+  /** For %CDI assets, the percent of CDI (e.g. 115 means 115% CDI). */
+  percentCDI?: number;
+  /** For IPCA+ assets, the real coupon (decimal, e.g. 0.065 = 6.5% real). */
+  cupomReal?: number;
+  /** VNA atualizado pela inflação acumulada (apenas IPCA+). */
+  vna?: number;
+  /** Fair / theoretical PU from active curve + credit spread. */
+  puJusto?: number;
+  /** Credit spread over reference curve, in bps. */
+  spreadCreditoBps?: number;
+  /** Macaulay duration in years. */
+  duration?: number;
+  /** Modified duration in years. */
+  durationModificada?: number;
+  /** DV01 in BRL — price change for 1bp yield shift. */
+  dv01?: number;
 }
 
 export interface Offer {
@@ -72,6 +105,17 @@ export interface Offer {
   matchScore: number;
   reasonForSale?: string;
   notes?: string;
+  // ── New canonical / derived fields (additive) ─────────────────────
+  /** Annualized gross yield implied by offeredPU (base 252). */
+  yieldBrutoAnual?: number;
+  /** Annualized net yield after IR (and IOF where applicable). */
+  yieldLiquidoAnual?: number;
+  /** Net yield expressed as % of CDI (PJ uses gross-equivalent). */
+  percentCDILiquido?: number;
+  /** Spread of offered yield vs active reference curve, in bps. */
+  spreadVsCurvaBps?: number;
+  /** Ágio (positive) / Deságio (negative) vs puJusto, in bps. */
+  agioDeagioBps?: number;
 }
 
 export interface Trade {
@@ -141,4 +185,42 @@ export interface BuyerSimulationOutput {
   daysToMaturity: number;
   vsCDI: number;
   breakEvenPrice: number;
+}
+
+// ── Finance engine types ────────────────────────────────────────────
+
+export interface FluxoCaixa {
+  data: Date;
+  valor: number;
+}
+
+export interface Vertice {
+  duDias: number;
+  taxa: number;
+}
+
+export interface CurvaReferencia {
+  fonte: FonteCurva;
+  indexador: Indexador;
+  vertices: Vertice[];
+  dataReferencia: Date;
+}
+
+export interface Demanda {
+  tipoAtivo?: AssetType;
+  ratingMinimo?: RatingTier;
+  taxaDesejada?: number;
+  durationDesejado?: number;
+  volumeBuscado?: number;
+}
+
+export interface MatchScoreBreakdown {
+  total: number;
+  componentes: {
+    taxa: number;
+    duration: number;
+    volume: number;
+    rating: number;
+    urgencia: number;
+  };
 }

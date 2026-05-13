@@ -12,6 +12,8 @@ import {
   Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { CDI_ANUAL } from "@/lib/finance/constants";
+import { formatPercent } from "@/lib/finance";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: BarChart3 },
@@ -78,7 +80,7 @@ export function Sidebar() {
           <span className="text-foreground">Operacional</span>
         </div>
         <div className="text-[10px] text-muted-foreground mt-1 font-mono">
-          CDI 11,15% a.a.
+          CDI {formatPercent(CDI_ANUAL)} a.a.
         </div>
       </div>
     </aside>
