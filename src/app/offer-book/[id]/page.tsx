@@ -25,21 +25,22 @@ import { PUComparison } from "@/components/asset-detail/pu-comparison";
 import { RateTunnelChart } from "@/components/asset-detail/rate-tunnel-chart";
 import { ExecutedRatesChart } from "@/components/asset-detail/executed-rates-chart";
 import { BuyIntentForm } from "@/components/asset-detail/buy-intent-form";
+import { YieldSpreadPanel } from "@/components/asset-detail/yield-spread-panel";
 import { offers } from "@/data/offers";
 import {
   buildExecutedRateSeries,
   buildHistoricalRateTunnel,
 } from "@/data/trades";
 import {
-  CDI_ANNUAL,
-  computeDiscountPct,
-  computeImpliedYield,
-  daysBetween,
+  CDI_ANUAL,
+  diasCorridos,
   formatCurrency,
   formatDateBR,
   formatPercent,
-  netReturnAfterTax,
 } from "@/lib/finance";
+import { cdiProjetadoPara } from "@/lib/finance/curves";
+import { diasUteis } from "@/lib/finance/holidays";
+import type { Indexador } from "@/types";
 
 export function generateStaticParams() {
   return offers.map((o) => ({ id: o.id }));
@@ -51,19 +52,21 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
 
   const asset = offer.asset;
   const today = new Date("2026-05-11T00:00:00Z");
-  const dtm = daysBetween(today, asset.maturity);
-  const impliedYield = computeImpliedYield(
-    offer.offeredPU,
-    asset.faceValue,
-    asset.maturity,
-    today,
-  );
-  const discount = computeDiscountPct(asset.faceValue, offer.offeredPU);
-  const grossProfit = asset.faceValue - offer.offeredPU;
-  const netProfit = netReturnAfterTax(grossProfit, 0.15);
+  const dtm = diasCorridos(today, asset.maturity);
+  const du = Math.max(1, diasUteis(today, asset.maturity));
+  const indexer: Indexador =
+    asset.indexerCode ??
+    (asset.indexer === "Pré"
+      ? "PRE"
+      : asset.indexer === "IPCA+"
+        ? "IPCA"
+        : "CDI");
 
-  const tunnelData = buildHistoricalRateTunnel(asset.originalRate, 90);
-  const executedData = buildExecutedRateSeries(offer.offeredRate, 18);
+  const yieldBruto = offer.yieldBrutoAnual ?? offer.offeredRate;
+  const cdiNoVertice = cdiProjetadoPara(du);
+
+  const tunnelData = buildHistoricalRateTunnel(yieldBruto, 90);
+  const executedData = buildExecutedRateSeries(yieldBruto, 18);
 
   return (
     <div className="space-y-6 max-w-[1480px] mx-auto">
@@ -92,40 +95,51 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
       />
 
       {/* Hero metrics */}
-      <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
         <HeroStat
           label="PU Ofertado"
           value={`R$ ${offer.offeredPU.toFixed(2)}`}
-          sub={`atual R$ ${asset.currentPU.toFixed(2)}`}
+          sub={`justo R$ ${(asset.puJusto ?? asset.currentPU).toFixed(2)}`}
           highlight
         />
         <HeroStat
-          label="Taxa Implícita"
-          value={formatPercent(impliedYield)}
-          sub={`orig. ${formatPercent(asset.originalRate)}`}
+          label="Yield Bruto"
+          value={formatPercent(yieldBruto)}
+          sub={
+            indexer === "CDI"
+              ? `${((yieldBruto / cdiNoVertice) * 100).toFixed(1)}% CDI`
+              : indexer === "IPCA"
+                ? "juro real"
+                : "pré-fixado"
+          }
           highlight
         />
         <HeroStat
-          label="Ágio / Deságio"
-          value={`${(offer.agioDeagioPct * 100).toFixed(2)}%`}
-          sub={offer.agioDeagioPct < 0 ? "deságio · oportunidade" : "ágio"}
-          positive={offer.agioDeagioPct < 0}
+          label="Spread (justo)"
+          value={`${(offer.agioDeagioBps ?? 0) >= 0 ? "+" : ""}${(offer.agioDeagioBps ?? 0).toFixed(0)} bps`}
+          sub={(offer.agioDeagioBps ?? 0) >= 0 ? "pickup" : "give-up"}
+          positive={(offer.agioDeagioBps ?? 0) >= 0}
         />
         <HeroStat
           label="Volume"
           value={formatCurrency(offer.volume, 0)}
-          sub={`${offer.quantity.toLocaleString("pt-BR")} unidades`}
+          sub={`${offer.quantity.toLocaleString("pt-BR")} unid.`}
+        />
+        <HeroStat
+          label="Duration"
+          value={`${(asset.duration ?? 0).toFixed(2)}y`}
+          sub={`DV01 R$ ${(asset.dv01 ?? 0).toFixed(4)}`}
         />
         <HeroStat
           label="Dias até venc."
           value={`${dtm}d`}
-          sub={`${(dtm / 365).toFixed(2)} anos`}
+          sub={`${(dtm / 365).toFixed(2)} anos · ${du}du`}
         />
         <HeroStat
-          label="vs CDI"
-          value={`${(impliedYield / CDI_ANNUAL).toFixed(2)}x`}
-          sub={`CDI ${formatPercent(CDI_ANNUAL)}`}
-          positive={impliedYield > CDI_ANNUAL}
+          label="vs CDI (líq. PF)"
+          value={`${((offer.percentCDILiquido ?? 0)).toFixed(0)}%`}
+          sub={`CDI ${formatPercent(CDI_ANUAL)}`}
+          positive={(offer.percentCDILiquido ?? 0) >= 100}
         />
       </section>
 
@@ -143,6 +157,11 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
               <div className="flex items-center gap-2">
                 <AssetTypeChip type={asset.type} />
                 <RatingPill rating={asset.issuer.rating} />
+                {asset.isIncentivada ? (
+                  <span className="inline-flex items-center justify-center rounded-sm border border-primary/40 bg-primary/10 text-primary px-1.5 py-0.5 text-[10px] font-mono font-semibold tracking-wider uppercase">
+                    Lei 12.431
+                  </span>
+                ) : null}
                 <StatusBadge status={offer.status} />
               </div>
             </CardHeader>
@@ -157,12 +176,38 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
                 <DetailRow icon={<Calendar className="h-3.5 w-3.5" />} label="Vencimento" value={formatDateBR(asset.maturity)} />
                 <DetailRow icon={<Coins className="h-3.5 w-3.5" />} label="Face Value" value={`R$ ${asset.faceValue.toFixed(2)}`} mono />
                 <DetailRow icon={<Percent className="h-3.5 w-3.5" />} label="Indexador" value={asset.indexer} />
-                <DetailRow icon={<Percent className="h-3.5 w-3.5" />} label="Taxa Original" value={formatPercent(asset.originalRate)} mono />
+                <DetailRow
+                  icon={<Percent className="h-3.5 w-3.5" />}
+                  label={indexer === "CDI" ? "% CDI contratado" : indexer === "IPCA" ? "Cupom real" : "Taxa Pré"}
+                  value={
+                    indexer === "CDI"
+                      ? `${(asset.percentCDI ?? asset.originalRate * 100).toFixed(2)}%`
+                      : formatPercent(
+                          indexer === "IPCA"
+                            ? (asset.cupomReal ?? asset.originalRate)
+                            : asset.originalRate,
+                        )
+                  }
+                  mono
+                />
+                {asset.vna ? (
+                  <DetailRow
+                    icon={<Coins className="h-3.5 w-3.5" />}
+                    label="VNA atualizado"
+                    value={`R$ ${asset.vna.toFixed(2)}`}
+                    mono
+                  />
+                ) : null}
                 <DetailRow icon={<Calendar className="h-3.5 w-3.5" />} label="Pagto Cupom" value={asset.couponFreq ?? "—"} />
                 <DetailRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="Custódia" value="B3 / Cetip" />
+                <DetailRow icon={<Gauge className="h-3.5 w-3.5" />} label="Spread de crédito" value={`${(asset.spreadCreditoBps ?? 0).toFixed(0)} bps`} mono />
+                <DetailRow icon={<Gauge className="h-3.5 w-3.5" />} label="Duration mod." value={`${(asset.durationModificada ?? 0).toFixed(2)}y`} mono />
               </div>
             </CardContent>
           </Card>
+
+          {/* Yield + spread panel (client) */}
+          <YieldSpreadPanel offer={offer} />
 
           {/* Charts tabs */}
           <Card>
@@ -185,7 +230,7 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
                   </div>
                 </TabsContent>
                 <TabsContent value="tunnel">
-                  <RateTunnelChart data={tunnelData} offeredRate={offer.offeredRate} />
+                  <RateTunnelChart data={tunnelData} offeredRate={yieldBruto} />
                   <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono mt-2">
                     Banda de ±45bps · linha de oferta destacada em amarelo
                   </div>
@@ -194,55 +239,12 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
             </CardContent>
           </Card>
 
-          {/* PU comparison & Discount */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <PUComparison
-              faceValue={asset.faceValue}
-              currentPU={asset.currentPU}
-              offeredPU={offer.offeredPU}
-            />
-            <Card>
-              <CardHeader>
-                <CardTitle>Análise de Deságio</CardTitle>
-                <div className="text-xs text-muted-foreground mt-1">
-                  Comparação contra preço de mercado e face value
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <StatRow
-                  label="Deságio sobre face value"
-                  value={`${(discount * 100).toFixed(2)}%`}
-                  positive
-                />
-                <StatRow
-                  label="Ágio / Deságio sobre mark"
-                  value={`${(offer.agioDeagioPct * 100).toFixed(2)}%`}
-                  positive={offer.agioDeagioPct < 0}
-                />
-                <StatRow
-                  label="Pickup vs. taxa original"
-                  value={`${((offer.offeredRate - asset.originalRate) * 10000).toFixed(0)} bps`}
-                  positive={offer.offeredRate > asset.originalRate}
-                />
-                <Separator />
-                <StatRow
-                  label="Lucro bruto até venc. (1 unid.)"
-                  value={`R$ ${grossProfit.toFixed(2)}`}
-                  positive
-                />
-                <StatRow
-                  label="Lucro líquido após IR 15%"
-                  value={`R$ ${netProfit.toFixed(2)}`}
-                  positive
-                />
-                <StatRow
-                  label="Lucro estimado total (volume)"
-                  value={formatCurrency(netProfit * offer.quantity, 2)}
-                  positive
-                />
-              </CardContent>
-            </Card>
-          </div>
+          {/* PU comparison */}
+          <PUComparison
+            faceValue={asset.faceValue}
+            currentPU={asset.puJusto ?? asset.currentPU}
+            offeredPU={offer.offeredPU}
+          />
 
           {/* Risk notes */}
           <Card>
@@ -256,22 +258,28 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
               <RiskItem
                 level="info"
                 title="Risco de crédito"
-                body={`Emissor ${asset.issuer.name} possui rating ${asset.issuer.rating}. Considere exposição setorial em ${asset.issuer.sector}.`}
+                body={`Emissor ${asset.issuer.name} possui rating ${asset.issuer.rating} · spread de crédito modelado em ${(asset.spreadCreditoBps ?? 0).toFixed(0)} bps. Considere exposição setorial em ${asset.issuer.sector}.`}
               />
               <RiskItem
                 level="info"
-                title="Risco de mercado"
-                body={`Movimentos na curva DI/IPCA podem afetar marcação. Duration aproximada ${(dtm / 365).toFixed(1)} anos.`}
+                title="Risco de mercado · duration"
+                body={`Duration mod. ${(asset.durationModificada ?? 0).toFixed(2)} anos · DV01 ≈ R$ ${(asset.dv01 ?? 0).toFixed(4)} por unidade. Um deslocamento paralelo de +100bps na curva reduziria o PU em ${(((asset.durationModificada ?? 0) * 0.01) * 100).toFixed(2)}%.`}
               />
               <RiskItem
                 level="warning"
                 title="Liquidez secundária"
-                body="Renda fixa corporativa pode apresentar baixa liquidez. Avalie a possibilidade de carregamento até o vencimento."
+                body="Renda fixa corporativa pode apresentar baixa liquidez. Avalie carregamento até o vencimento e o impacto no DV01."
               />
               <RiskItem
                 level="info"
                 title="Tributação"
-                body="IR regressivo 22,5% → 15% conforme prazo. LCI / LCA / Debêntures incentivadas podem ter isenção."
+                body={
+                  asset.isIncentivada
+                    ? "Debênture incentivada (Lei 12.431): isenta de IR para PF. PJ tributada normalmente."
+                    : asset.type === "LCI" || asset.type === "LCA" || asset.type === "CRI" || asset.type === "CRA"
+                      ? `${asset.type} é isento de IR para PF. PJ tributada pela tabela regressiva.`
+                      : "IR regressivo 22,5% → 15% conforme prazo (tabela Lei 11.033)."
+                }
               />
             </CardContent>
           </Card>
@@ -291,7 +299,16 @@ export default function OfferDetailPage({ params }: { params: { id: string } }) 
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <StatRow label="PU ofertado" value={`R$ ${offer.offeredPU.toFixed(2)}`} mono />
-              <StatRow label="Taxa ofertada" value={formatPercent(offer.offeredRate)} highlight mono />
+              <StatRow
+                label={indexer === "CDI" ? "Taxa (% CDI)" : "Yield bruto a.a."}
+                value={
+                  indexer === "CDI"
+                    ? `${((yieldBruto / cdiNoVertice) * 100).toFixed(1)}% CDI`
+                    : formatPercent(yieldBruto)
+                }
+                highlight
+                mono
+              />
               <StatRow label="Quantidade" value={offer.quantity.toLocaleString("pt-BR")} mono />
               <StatRow label="Volume" value={formatCurrency(offer.volume, 0)} mono />
               <Separator />

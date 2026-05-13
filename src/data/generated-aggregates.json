@@ -1,0 +1,31 @@
+{
+  "generatedAt": "2026-05-11T00:00:00.000Z",
+  "seed": 42,
+  "totalAssets": 150,
+  "totalOffers": 150,
+  "countByType": {
+    "Debênture": 39,
+    "CDB": 45,
+    "CRA": 8,
+    "CRI": 12,
+    "LCI": 23,
+    "LCA": 14,
+    "Tesouro": 9
+  },
+  "countByIndexer": {
+    "IPCA": 35,
+    "CDI": 47,
+    "PRE": 68
+  },
+  "countByStatus": {
+    "Disponível": 130,
+    "Executada": 4,
+    "Pendente": 7,
+    "Em negociação": 9
+  },
+  "medianSpreadByIndexerBps": {
+    "PRE": 167.9923456362513,
+    "CDI": 270.9219294299242,
+    "IPCA": -91.90276413181431
+  }
+}

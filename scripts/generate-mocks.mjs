@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 const OUT_PATH = join(REPO_ROOT, "src", "data", "generated.json");
+const AGG_PATH = join(REPO_ROOT, "src", "data", "generated-aggregates.json");
 
 // ── Constants (espelha src/lib/finance/constants.ts) ───────────────
 const CDI_ANUAL = 0.144;
@@ -525,11 +526,44 @@ for (const a of ds.assets) byType[a.type] = (byType[a.type]||0)+1;
 for (const a of ds.assets) byIndexer[a.indexerCode] = (byIndexer[a.indexerCode]||0)+1;
 for (const o of ds.offers) byStatus[o.status] = (byStatus[o.status]||0)+1;
 
+// Agregações pré-computadas (separadas pra evitar inflar bundles
+// que só precisam de poucos números — ex.: sell-flow).
+function median(values) {
+  if (values.length === 0) return 0;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid-1] + s[mid]) / 2;
+}
+const spreadByIdx = { PRE: [], CDI: [], IPCA: [] };
+for (const o of ds.offers) {
+  if (o.status !== "Disponível" && o.status !== "Em negociação") continue;
+  if (typeof o.spreadVsCurvaBps === "number") {
+    spreadByIdx[o.asset.indexerCode].push(o.spreadVsCurvaBps);
+  }
+}
+const aggregates = {
+  generatedAt: ds.generatedAt,
+  seed: ds.seed,
+  totalAssets: ds.assets.length,
+  totalOffers: ds.offers.length,
+  countByType: byType,
+  countByIndexer: byIndexer,
+  countByStatus: byStatus,
+  medianSpreadByIndexerBps: {
+    PRE: median(spreadByIdx.PRE),
+    CDI: median(spreadByIdx.CDI),
+    IPCA: median(spreadByIdx.IPCA),
+  },
+};
+
 console.log("✓ Generated", ds.assets.length, "assets +", ds.offers.length, "offers");
 console.log("  by type:    ", byType);
 console.log("  by indexer: ", byIndexer);
 console.log("  by status:  ", byStatus);
+console.log("  median spread (bps):", aggregates.medianSpreadByIndexerBps);
 
 mkdirSync(dirname(OUT_PATH), { recursive: true });
 writeFileSync(OUT_PATH, JSON.stringify(ds, null, 2));
+writeFileSync(AGG_PATH, JSON.stringify(aggregates, null, 2));
 console.log("✓ Wrote", OUT_PATH);
+console.log("✓ Wrote", AGG_PATH);

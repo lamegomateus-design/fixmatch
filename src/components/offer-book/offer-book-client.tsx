@@ -7,6 +7,7 @@ import {
   ArrowDownUp,
   ArrowUp,
   Filter,
+  Info,
   Search,
   Star,
   X,
@@ -48,14 +49,32 @@ import {
   formatDateBR,
   formatPercent,
 } from "@/lib/finance";
-import type { AssetType, Offer, RatingTier } from "@/types";
+import {
+  CURVA_ANBIMA_IPCA,
+  CURVA_DI_B3,
+  CURVA_ANBIMA_PRE,
+  cdiProjetadoPara,
+} from "@/lib/finance/curves";
+import { spreadVsCurva } from "@/lib/finance/spread";
+import { diasUteis } from "@/lib/finance/holidays";
+import { useFonteCurva } from "@/lib/curve-context";
+import type {
+  AssetType,
+  Indexador,
+  Offer,
+  RatingTier,
+} from "@/types";
 import { cn } from "@/lib/utils";
 
 type SortKey =
   | "matchScore"
-  | "offeredRate"
+  | "yieldBruto"
+  | "yieldLiquido"
+  | "percentCDI"
   | "offeredPU"
-  | "agioDeagioPct"
+  | "spreadCurvaBps"
+  | "agioDeagioBps"
+  | "duration"
   | "volume"
   | "maturity";
 
@@ -68,6 +87,13 @@ const ASSET_TYPES: (AssetType | "Todos")[] = [
   "CRI",
   "CRA",
   "Tesouro",
+];
+
+const INDEXADORES: { value: Indexador | "all"; label: string }[] = [
+  { value: "all", label: "Todos os indexadores" },
+  { value: "PRE", label: "Pré-fixado" },
+  { value: "CDI", label: "%CDI" },
+  { value: "IPCA", label: "IPCA+" },
 ];
 
 const RATING_BUCKETS: { value: string; label: string; ratings: RatingTier[] }[] = [
@@ -93,9 +119,24 @@ interface Props {
   offers: Offer[];
 }
 
+interface OfferDerived extends Offer {
+  /** Indexador code derivado (PRE/CDI/IPCA) — preencho caso o snapshot não traga. */
+  _indexer: Indexador;
+  /** Spread vs curva ATIVA (DI ou ANBIMA Pré) recomputado client-side. */
+  _spreadCurvaBps: number;
+  /** Yield bruto sempre em decimal (não % CDI). */
+  _yieldBruto: number;
+  /** %CDI bruto derivado quando aplicável. */
+  _percentCDIBruto?: number;
+  /** Duration em anos (asset). */
+  _duration: number;
+}
+
 export function OfferBookClient({ offers }: Props) {
+  const { fonteCurva } = useFonteCurva();
   const [search, setSearch] = React.useState("");
   const [type, setType] = React.useState<AssetType | "Todos">("Todos");
+  const [indexerFilter, setIndexerFilter] = React.useState<Indexador | "all">("all");
   const [rating, setRating] = React.useState("all");
   const [urgencyFilter, setUrgencyFilter] = React.useState<string>("all");
   const [statusFilter, setStatusFilter] = React.useState<string>("ativos");
@@ -103,10 +144,53 @@ export function OfferBookClient({ offers }: Props) {
   const [sortKey, setSortKey] = React.useState<SortKey>("matchScore");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
 
+  /** Reduz cada oferta a um objeto com campos derivados/normalizados. */
+  const derived = React.useMemo<OfferDerived[]>(() => {
+    return offers.map((o) => {
+      const idx: Indexador =
+        o.asset.indexerCode ??
+        (o.asset.indexer === "Pré"
+          ? "PRE"
+          : o.asset.indexer === "IPCA+"
+            ? "IPCA"
+            : "CDI");
+
+      const yieldBruto = o.yieldBrutoAnual ?? o.offeredRate;
+      const du = Math.max(1, diasUteis(new Date(), o.asset.maturity));
+
+      // Recalcula spread vs curva ATIVA conforme toggle
+      let spreadCurvaBps: number;
+      if (idx === "IPCA") {
+        spreadCurvaBps = spreadVsCurva(yieldBruto, du, CURVA_ANBIMA_IPCA, "IPCA");
+      } else if (idx === "PRE") {
+        const curva = fonteCurva === "ANBIMA" ? CURVA_ANBIMA_PRE : CURVA_DI_B3;
+        spreadCurvaBps = spreadVsCurva(yieldBruto, du, curva, "PRE");
+      } else {
+        // CDI: compara taxa equivalente do ativo com CDI projetado no vértice
+        const cdiProj = cdiProjetadoPara(du);
+        spreadCurvaBps = (yieldBruto - cdiProj) * 10_000;
+      }
+
+      const percentCDIBruto =
+        idx === "CDI"
+          ? (yieldBruto / cdiProjetadoPara(du)) * 100
+          : undefined;
+
+      return {
+        ...o,
+        _indexer: idx,
+        _spreadCurvaBps: spreadCurvaBps,
+        _yieldBruto: yieldBruto,
+        _percentCDIBruto: percentCDIBruto,
+        _duration: o.asset.duration ?? 0,
+      };
+    });
+  }, [offers, fonteCurva]);
+
   const filtered = React.useMemo(() => {
     const yieldMin = yieldRange[0] / 100;
     const ratingBucket = RATING_BUCKETS.find((r) => r.value === rating);
-    return offers
+    return derived
       .filter((o) => {
         if (statusFilter === "ativos") {
           if (!(o.status === "Disponível" || o.status === "Em negociação")) return false;
@@ -114,6 +198,7 @@ export function OfferBookClient({ offers }: Props) {
           return false;
         }
         if (type !== "Todos" && o.asset.type !== type) return false;
+        if (indexerFilter !== "all" && o._indexer !== indexerFilter) return false;
         if (
           ratingBucket &&
           ratingBucket.ratings.length > 0 &&
@@ -121,7 +206,7 @@ export function OfferBookClient({ offers }: Props) {
         )
           return false;
         if (urgencyFilter !== "all" && o.urgency !== urgencyFilter) return false;
-        if (o.offeredRate < yieldMin) return false;
+        if (o._yieldBruto < yieldMin) return false;
         if (search.trim()) {
           const q = search.toLowerCase();
           const haystack =
@@ -132,18 +217,42 @@ export function OfferBookClient({ offers }: Props) {
       })
       .sort((a, b) => {
         const dir = sortDir === "asc" ? 1 : -1;
-        const av = (a as any)[sortKey];
-        const bv = (b as any)[sortKey];
-        if (sortKey === "maturity") {
+        const key = sortKey;
+        if (key === "maturity") {
           return (
             (new Date(a.asset.maturity).getTime() -
               new Date(b.asset.maturity).getTime()) *
             dir
           );
         }
-        return (av - bv) * dir;
+        const map: Record<SortKey, number> = {
+          matchScore: a.matchScore - b.matchScore,
+          yieldBruto: a._yieldBruto - b._yieldBruto,
+          yieldLiquido:
+            (a.yieldLiquidoAnual ?? 0) - (b.yieldLiquidoAnual ?? 0),
+          percentCDI:
+            (a._percentCDIBruto ?? 0) - (b._percentCDIBruto ?? 0),
+          offeredPU: a.offeredPU - b.offeredPU,
+          spreadCurvaBps: a._spreadCurvaBps - b._spreadCurvaBps,
+          agioDeagioBps: (a.agioDeagioBps ?? 0) - (b.agioDeagioBps ?? 0),
+          duration: a._duration - b._duration,
+          volume: a.volume - b.volume,
+          maturity: 0,
+        };
+        return map[key] * dir;
       });
-  }, [offers, search, type, rating, urgencyFilter, statusFilter, yieldRange, sortKey, sortDir]);
+  }, [
+    derived,
+    search,
+    type,
+    indexerFilter,
+    rating,
+    urgencyFilter,
+    statusFilter,
+    yieldRange,
+    sortKey,
+    sortDir,
+  ]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {
@@ -157,6 +266,7 @@ export function OfferBookClient({ offers }: Props) {
   function resetFilters() {
     setSearch("");
     setType("Todos");
+    setIndexerFilter("all");
     setRating("all");
     setUrgencyFilter("all");
     setStatusFilter("ativos");
@@ -166,9 +276,9 @@ export function OfferBookClient({ offers }: Props) {
   }
 
   const totalVolume = filtered.reduce((s, o) => s + o.volume, 0);
-  const avgRate =
+  const avgYield =
     filtered.length > 0
-      ? filtered.reduce((s, o) => s + o.offeredRate, 0) / filtered.length
+      ? filtered.reduce((s, o) => s + o._yieldBruto, 0) / filtered.length
       : 0;
 
   return (
@@ -206,6 +316,25 @@ export function OfferBookClient({ offers }: Props) {
                 {ASSET_TYPES.map((t) => (
                   <SelectItem key={t} value={t}>
                     {t}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Indexador</Label>
+            <Select
+              value={indexerFilter}
+              onValueChange={(v) => setIndexerFilter(v as Indexador | "all")}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {INDEXADORES.map((i) => (
+                  <SelectItem key={i.value} value={i.value}>
+                    {i.label}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -262,7 +391,7 @@ export function OfferBookClient({ offers }: Props) {
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label>Taxa mínima</Label>
+              <Label>Yield bruto mínimo</Label>
               <span className="font-mono text-xs tabular-nums text-primary">
                 {yieldRange[0].toFixed(1)}%
               </span>
@@ -271,13 +400,13 @@ export function OfferBookClient({ offers }: Props) {
               value={yieldRange}
               onValueChange={(v) => setYieldRange([v[0]])}
               min={0}
-              max={18}
+              max={25}
               step={0.5}
             />
             <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
               <span>0%</span>
-              <span>9%</span>
-              <span>18%</span>
+              <span>12,5%</span>
+              <span>25%</span>
             </div>
           </div>
 
@@ -295,10 +424,13 @@ export function OfferBookClient({ offers }: Props) {
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Taxa média</span>
+              <span className="text-muted-foreground">Yield bruto médio</span>
               <span className="font-mono tabular-nums text-primary">
-                {formatPercent(avgRate)}
+                {formatPercent(avgYield)}
               </span>
+            </div>
+            <div className="pt-1 mt-1 border-t border-terminal-border text-[10px] uppercase tracking-wider text-muted-foreground inline-flex items-center gap-1">
+              <Info className="h-3 w-3" /> Spread vs curva {fonteCurva === "ANBIMA" ? "ANBIMA" : "DI · B3"}
             </div>
           </div>
         </CardContent>
@@ -309,20 +441,24 @@ export function OfferBookClient({ offers }: Props) {
           <div>
             <CardTitle>Livro de Ofertas · Live</CardTitle>
             <div className="text-xs text-muted-foreground mt-1">
-              {filtered.length} ofertas · ordenado por {sortKey === "matchScore" ? "match score" : sortKey} ({sortDir === "desc" ? "↓" : "↑"})
+              {filtered.length} ofertas · ordenado por {sortKey} ({sortDir === "desc" ? "↓" : "↑"})
             </div>
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="positive" className="animate-pulse">● Live</Badge>
             <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
-              <SelectTrigger className="w-[180px] h-8">
+              <SelectTrigger className="w-[200px] h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="matchScore">Match Score</SelectItem>
-                <SelectItem value="offeredRate">Taxa Ofertada</SelectItem>
+                <SelectItem value="yieldBruto">Yield bruto</SelectItem>
+                <SelectItem value="yieldLiquido">Yield líquido</SelectItem>
+                <SelectItem value="percentCDI">%CDI bruto</SelectItem>
+                <SelectItem value="spreadCurvaBps">Spread vs curva</SelectItem>
+                <SelectItem value="agioDeagioBps">Ágio/Deságio (bps)</SelectItem>
+                <SelectItem value="duration">Duration</SelectItem>
                 <SelectItem value="offeredPU">PU Ofertado</SelectItem>
-                <SelectItem value="agioDeagioPct">Ágio / Deságio</SelectItem>
                 <SelectItem value="volume">Volume</SelectItem>
                 <SelectItem value="maturity">Vencimento</SelectItem>
               </SelectContent>
@@ -336,9 +472,19 @@ export function OfferBookClient({ offers }: Props) {
                 <TableHead className="w-[100px]">Match</TableHead>
                 <TableHead>Ativo</TableHead>
                 <TableHead>Tipo</TableHead>
+                <TableHead>Idx</TableHead>
                 <TableHead>Emissor</TableHead>
                 <TableHead>Rating</TableHead>
                 <TableHead>Venc.</TableHead>
+                <TableHead className="text-right">
+                  <SortHeader
+                    active={sortKey === "duration"}
+                    dir={sortDir}
+                    onClick={() => toggleSort("duration")}
+                  >
+                    Dur.
+                  </SortHeader>
+                </TableHead>
                 <TableHead className="text-right">
                   <SortHeader
                     active={sortKey === "offeredPU"}
@@ -350,20 +496,38 @@ export function OfferBookClient({ offers }: Props) {
                 </TableHead>
                 <TableHead className="text-right">
                   <SortHeader
-                    active={sortKey === "offeredRate"}
+                    active={sortKey === "yieldBruto"}
                     dir={sortDir}
-                    onClick={() => toggleSort("offeredRate")}
+                    onClick={() => toggleSort("yieldBruto")}
                   >
-                    Taxa
+                    Taxa bruta
                   </SortHeader>
                 </TableHead>
                 <TableHead className="text-right">
                   <SortHeader
-                    active={sortKey === "agioDeagioPct"}
+                    active={sortKey === "yieldLiquido"}
                     dir={sortDir}
-                    onClick={() => toggleSort("agioDeagioPct")}
+                    onClick={() => toggleSort("yieldLiquido")}
                   >
-                    Ágio/Deságio
+                    Líq · %CDI
+                  </SortHeader>
+                </TableHead>
+                <TableHead className="text-right">
+                  <SortHeader
+                    active={sortKey === "spreadCurvaBps"}
+                    dir={sortDir}
+                    onClick={() => toggleSort("spreadCurvaBps")}
+                  >
+                    Spread
+                  </SortHeader>
+                </TableHead>
+                <TableHead className="text-right">
+                  <SortHeader
+                    active={sortKey === "agioDeagioBps"}
+                    dir={sortDir}
+                    onClick={() => toggleSort("agioDeagioBps")}
+                  >
+                    Ágio/Desg.
                   </SortHeader>
                 </TableHead>
                 <TableHead className="text-right">
@@ -402,7 +566,10 @@ export function OfferBookClient({ offers }: Props) {
                   <TableCell>
                     <AssetTypeChip type={o.asset.type} />
                   </TableCell>
-                  <TableCell className="text-xs max-w-[200px] truncate">
+                  <TableCell>
+                    <IndexerChip indexer={o._indexer} />
+                  </TableCell>
+                  <TableCell className="text-xs max-w-[160px] truncate">
                     {o.asset.issuer.name}
                   </TableCell>
                   <TableCell>
@@ -411,31 +578,62 @@ export function OfferBookClient({ offers }: Props) {
                   <TableCell className="font-mono tabular-nums text-xs">
                     {formatDateBR(o.asset.maturity)}
                   </TableCell>
+                  <TableCell className="text-right font-mono tabular-nums text-xs">
+                    {o._duration.toFixed(2)}y
+                  </TableCell>
                   <TableCell className="text-right font-mono tabular-nums">
                     <div className="leading-tight">
                       <div>{o.offeredPU.toFixed(2)}</div>
                       <div className="text-[10px] text-muted-foreground">
-                        atual {o.asset.currentPU.toFixed(2)}
+                        justo {(o.asset.puJusto ?? o.asset.currentPU).toFixed(2)}
                       </div>
                     </div>
                   </TableCell>
                   <TableCell className="text-right font-mono tabular-nums">
                     <div className="leading-tight">
                       <div className="text-primary font-semibold">
-                        {formatPercent(o.offeredRate)}
+                        {formatPercent(o._yieldBruto)}
+                      </div>
+                      {o._percentCDIBruto != null ? (
+                        <div className="text-[10px] text-muted-foreground">
+                          {o._percentCDIBruto.toFixed(1)}% CDI
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-muted-foreground">
+                          {o._indexer === "IPCA" ? "real" : "pré"}
+                        </div>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-right font-mono tabular-nums">
+                    <div className="leading-tight">
+                      <div className="text-positive">
+                        {formatPercent(o.yieldLiquidoAnual ?? 0)}
                       </div>
                       <div className="text-[10px] text-muted-foreground">
-                        orig. {formatPercent(o.asset.originalRate)}
+                        {(o.percentCDILiquido ?? 0).toFixed(1)}% CDI
                       </div>
                     </div>
                   </TableCell>
                   <TableCell
                     className={cn(
-                      "text-right font-mono tabular-nums",
-                      o.agioDeagioPct < 0 ? "text-positive" : "text-warning",
+                      "text-right font-mono tabular-nums text-xs",
+                      o._spreadCurvaBps >= 0 ? "text-positive" : "text-warning",
                     )}
                   >
-                    {(o.agioDeagioPct * 100).toFixed(2)}%
+                    {o._spreadCurvaBps >= 0 ? "+" : ""}
+                    {o._spreadCurvaBps.toFixed(0)} bps
+                  </TableCell>
+                  <TableCell
+                    className={cn(
+                      "text-right font-mono tabular-nums text-xs",
+                      (o.agioDeagioBps ?? 0) >= 0
+                        ? "text-positive"
+                        : "text-warning",
+                    )}
+                  >
+                    {(o.agioDeagioBps ?? 0) >= 0 ? "+" : ""}
+                    {(o.agioDeagioBps ?? 0).toFixed(0)} bps
                   </TableCell>
                   <TableCell className="text-right font-mono tabular-nums text-xs">
                     {formatCurrency(o.volume, 0)}
@@ -460,7 +658,7 @@ export function OfferBookClient({ offers }: Props) {
               ))}
               {filtered.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={13} className="text-center text-muted-foreground py-12">
+                  <TableCell colSpan={17} className="text-center text-muted-foreground py-12">
                     Nenhuma oferta encontrada com os filtros atuais.
                   </TableCell>
                 </TableRow>
@@ -503,5 +701,33 @@ function SortHeader({
         <ArrowDownUp className="h-3 w-3 opacity-40" />
       )}
     </button>
+  );
+}
+
+function IndexerChip({ indexer }: { indexer: Indexador }) {
+  const map: Record<Indexador, { label: string; cls: string }> = {
+    PRE: {
+      label: "Pré",
+      cls: "border-info/30 bg-info/10 text-info",
+    },
+    CDI: {
+      label: "%CDI",
+      cls: "border-primary/30 bg-primary/10 text-primary",
+    },
+    IPCA: {
+      label: "IPCA+",
+      cls: "border-warning/30 bg-warning/10 text-warning",
+    },
+  };
+  const m = map[indexer];
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center justify-center rounded-sm border px-1.5 py-0.5 text-[10px] font-mono font-semibold tracking-wider uppercase",
+        m.cls,
+      )}
+    >
+      {m.label}
+    </span>
   );
 }

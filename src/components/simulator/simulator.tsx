@@ -11,7 +11,14 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Calculator, Equal, Percent, Sparkles, TrendingUp } from "lucide-react";
+import {
+  Calculator,
+  Equal,
+  Percent,
+  Scale,
+  Sparkles,
+  TrendingUp,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,75 +32,155 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { formatCurrency, formatPercent } from "@/lib/finance";
+import { CDI_ANUAL, IPCA_ANUAL, SELIC_ANUAL, VNA_BASE } from "@/lib/finance/constants";
 import {
-  CDI_ANNUAL,
-  daysBetween,
-  formatCurrency,
-  formatPercent,
-  runBuyerSimulation,
-} from "@/lib/finance";
-import type { IndexerType } from "@/types";
+  calcularPU_PreFixado,
+  calcularPU_CDI,
+  calcularPU_IPCA,
+  atualizarVNA,
+} from "@/lib/finance/pu";
+import {
+  calcularYieldImplicito_CDI,
+  calcularYieldImplicito_IPCA,
+  calcularYieldImplicito_PreFixado,
+} from "@/lib/finance/yield";
+import {
+  CURVA_ANBIMA_IPCA,
+  CURVA_ANBIMA_PRE,
+  CURVA_DI_B3,
+  cdiProjetadoPara,
+} from "@/lib/finance/curves";
+import { spreadVsCurva } from "@/lib/finance/spread";
+import { aliquotaIR, calcularYieldLiquido } from "@/lib/finance/taxation";
+import { comparacaoVsCDI } from "@/lib/finance/cdi";
+import { diasCorridos, diasUteis } from "@/lib/finance/holidays";
+import { useFonteCurva } from "@/lib/curve-context";
+import type { AssetType, Indexador, Perfil } from "@/types";
 
-const TAX_BRACKETS = [
-  { value: 0.225, label: "22,5% · até 180d" },
-  { value: 0.2, label: "20% · 181 – 360d" },
-  { value: 0.175, label: "17,5% · 361 – 720d" },
-  { value: 0.15, label: "15% · 720d+" },
-  { value: 0, label: "Isento (LCI/LCA/CRI/CRA)" },
+const ASSET_TYPES: AssetType[] = [
+  "CDB",
+  "LCI",
+  "LCA",
+  "Debênture",
+  "CRI",
+  "CRA",
+  "Tesouro",
 ];
 
-const INDEXERS: IndexerType[] = ["Pré", "CDI", "IPCA+", "Selic"];
+const INDEXADORES: { value: Indexador; label: string }[] = [
+  { value: "PRE", label: "Pré-fixado" },
+  { value: "CDI", label: "%CDI" },
+  { value: "IPCA", label: "IPCA+" },
+];
 
 export function Simulator() {
-  const [purchasePU, setPurchasePU] = React.useState(932.5);
+  const { fonteCurva } = useFonteCurva();
+  const [tipo, setTipo] = React.useState<AssetType>("CDB");
+  const [perfil, setPerfil] = React.useState<Perfil>("PF");
+  const [indexer, setIndexer] = React.useState<Indexador>("PRE");
+  const [isIncentivada, setIsIncentivada] = React.useState(false);
+  const [purchasePU, setPurchasePU] = React.useState(783.15);
+  const [puSlider, setPuSlider] = React.useState([783.15]);
   const [faceValue, setFaceValue] = React.useState(1000);
-  const [maturity, setMaturity] = React.useState("2027-06-15");
-  const [rate, setRate] = React.useState(0.142);
-  const [indexer, setIndexer] = React.useState<IndexerType>("Pré");
-  const [taxBracket, setTaxBracket] = React.useState(0.15);
-  const [desiredReturn, setDesiredReturn] = React.useState(0.14);
-  const [puSlider, setPuSlider] = React.useState([932.5]);
+  const [maturity, setMaturity] = React.useState("2028-05-11");
+  const [taxaPre, setTaxaPre] = React.useState(0.16);
+  const [percentCDI, setPercentCDI] = React.useState(115);
+  const [cupomReal, setCupomReal] = React.useState(0.065);
+  const [desiredReturn, setDesiredReturn] = React.useState(0.15);
 
   React.useEffect(() => {
     setPurchasePU(puSlider[0]);
   }, [puSlider]);
 
-  const result = runBuyerSimulation({
-    purchasePU,
-    faceValue,
-    maturity,
-    rate,
-    indexer,
-    taxBracket,
-    desiredReturn,
+  // Reset incentivada when type is not Debênture
+  React.useEffect(() => {
+    if (tipo !== "Debênture") setIsIncentivada(false);
+  }, [tipo]);
+
+  const today = new Date("2026-05-11T00:00:00Z");
+  const matDate = new Date(maturity);
+  const du = Math.max(1, diasUteis(today, matDate));
+  const dc = diasCorridos(today, matDate);
+
+  // VNA atualizado se IPCA+ (assume emissão na data de hoje pra simplicidade)
+  const vna = indexer === "IPCA" ? VNA_BASE : faceValue;
+
+  // Yield bruto implícito a partir do PU + parâmetros
+  let yieldBrutoAnual: number;
+  let puJusto: number;
+  let percentCDIImplicito: number | undefined;
+
+  if (indexer === "PRE") {
+    yieldBrutoAnual = calcularYieldImplicito_PreFixado(purchasePU, faceValue, du);
+    puJusto = calcularPU_PreFixado(faceValue, taxaPre, du);
+  } else if (indexer === "CDI") {
+    const cdiProj = cdiProjetadoPara(du);
+    const r = calcularYieldImplicito_CDI(purchasePU, faceValue, du, cdiProj);
+    yieldBrutoAnual = r.taxaEquivAnual;
+    percentCDIImplicito = r.percentCDI;
+    puJusto = calcularPU_CDI(faceValue, percentCDI, du, cdiProj);
+  } else {
+    yieldBrutoAnual = calcularYieldImplicito_IPCA(purchasePU, vna, du);
+    puJusto = calcularPU_IPCA(vna, cupomReal, du);
+  }
+
+  const yieldLiquidoAnual = calcularYieldLiquido(
+    yieldBrutoAnual,
+    tipo,
+    dc,
+    perfil,
+    isIncentivada,
+  );
+
+  const ir = aliquotaIR({
+    tipoAtivo: tipo,
+    isIncentivada,
+    prazoDias: dc,
+    perfil,
   });
 
+  const vsCDIBruto = comparacaoVsCDI(yieldBrutoAnual, cdiProjetadoPara(du));
+  const vsCDILiquido = comparacaoVsCDI(yieldLiquidoAnual, cdiProjetadoPara(du));
+
+  // Spread vs curva ativa
+  let spreadBps: number;
+  if (indexer === "IPCA") {
+    spreadBps = spreadVsCurva(yieldBrutoAnual, du, CURVA_ANBIMA_IPCA, "IPCA");
+  } else if (indexer === "PRE") {
+    const curva = fonteCurva === "ANBIMA" ? CURVA_ANBIMA_PRE : CURVA_DI_B3;
+    spreadBps = spreadVsCurva(yieldBrutoAnual, du, curva, "PRE");
+  } else {
+    spreadBps = (yieldBrutoAnual - cdiProjetadoPara(du)) * 10_000;
+  }
+
+  // Lucro estimado por unidade até o vencimento
+  const valorResgate = indexer === "IPCA" ? vna : faceValue;
+  const grossProfit = valorResgate - purchasePU;
+  const netProfit = ir.isento ? grossProfit : grossProfit * (1 - ir.ir);
+
+  // Break-even = PU que iguala CDI
+  const breakEven =
+    faceValue / Math.pow(1 + cdiProjetadoPara(du), du / 252);
+
+  const meetsDesired = yieldLiquidoAnual >= desiredReturn;
+
+  // Benchmarks chart data
   const ratesComparison = [
+    { name: "Poupança", value: 0.062, color: "hsl(140 10% 50%)" },
+    { name: "CDI", value: CDI_ANUAL, color: "hsl(199 89% 55%)" },
+    { name: "Selic", value: SELIC_ANUAL, color: "hsl(160 70% 45%)" },
     {
-      name: "Poupança",
-      value: 0.0707,
-      color: "hsl(140 10% 50%)",
+      name: "Bruto",
+      value: yieldBrutoAnual,
+      color: "hsl(38 92% 55%)",
     },
     {
-      name: "CDI",
-      value: CDI_ANNUAL,
-      color: "hsl(199 89% 55%)",
-    },
-    {
-      name: "Selic",
-      value: 0.1125,
-      color: "hsl(160 70% 45%)",
-    },
-    {
-      name: "Esta Oferta",
-      value: result.annualizedYield,
+      name: "Líquido",
+      value: yieldLiquidoAnual,
       color: "hsl(142 80% 48%)",
     },
   ];
-
-  const cdiRatio = result.vsCDI;
-  const meetsDesired = result.annualizedYield >= desiredReturn;
-  const days = daysBetween(new Date("2026-05-11T00:00:00Z"), maturity);
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-4">
@@ -104,11 +191,56 @@ export function Simulator() {
               <Calculator className="h-3.5 w-3.5" /> Parâmetros da Operação
             </CardTitle>
             <div className="text-xs text-muted-foreground mt-1">
-              Configure os dados da operação para simular retorno, comparações e
-              preço de equilíbrio.
+              Tipo de ativo, indexador, perfil tributário (PF/PJ), prazo e PU
+              de compra alimentam o cálculo de yield bruto, líquido e spread.
             </div>
           </CardHeader>
           <CardContent className="space-y-5">
+            {/* Profile + asset type */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Tipo de Ativo</Label>
+                <Select value={tipo} onValueChange={(v) => setTipo(v as AssetType)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ASSET_TYPES.map((t) => (
+                      <SelectItem key={t} value={t}>
+                        {t}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Perfil Tributário</Label>
+                <Tabs value={perfil} onValueChange={(v) => setPerfil(v as Perfil)}>
+                  <TabsList className="w-full">
+                    <TabsTrigger value="PF" className="flex-1">
+                      Pessoa Física
+                    </TabsTrigger>
+                    <TabsTrigger value="PJ" className="flex-1">
+                      Pessoa Jurídica
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              </div>
+            </div>
+
+            {tipo === "Debênture" ? (
+              <label className="inline-flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={isIncentivada}
+                  onChange={(e) => setIsIncentivada(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                Debênture incentivada (Lei 12.431) · isenta IR para PF
+              </label>
+            ) : null}
+
+            {/* PU slider */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>PU de Compra</Label>
@@ -119,17 +251,18 @@ export function Simulator() {
               <Slider
                 value={puSlider}
                 onValueChange={(v) => setPuSlider([v[0]])}
-                min={faceValue * 0.6}
-                max={faceValue * 1.05}
+                min={faceValue * 0.4}
+                max={faceValue * 1.1}
                 step={0.5}
               />
               <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
-                <span>R$ {(faceValue * 0.6).toFixed(0)}</span>
-                <span>R$ {(faceValue * 0.825).toFixed(0)}</span>
-                <span>R$ {(faceValue * 1.05).toFixed(0)}</span>
+                <span>R$ {(faceValue * 0.4).toFixed(0)}</span>
+                <span>R$ {(faceValue * 0.75).toFixed(0)}</span>
+                <span>R$ {(faceValue * 1.1).toFixed(0)}</span>
               </div>
             </div>
 
+            {/* Numeric inputs */}
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <div className="space-y-1.5">
                 <Label>Valor de Face (R$)</Label>
@@ -148,47 +281,55 @@ export function Simulator() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Cupom / Taxa Nominal (% a.a.)</Label>
-                <Input
-                  type="number"
-                  step={0.01}
-                  value={(rate * 100).toFixed(2)}
-                  onChange={(e) => setRate((Number(e.target.value) || 0) / 100)}
-                />
-              </div>
-              <div className="space-y-1.5">
                 <Label>Indexador</Label>
-                <Select value={indexer} onValueChange={(v) => setIndexer(v as IndexerType)}>
+                <Select value={indexer} onValueChange={(v) => setIndexer(v as Indexador)}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {INDEXERS.map((i) => (
-                      <SelectItem key={i} value={i}>
-                        {i}
+                    {INDEXADORES.map((i) => (
+                      <SelectItem key={i.value} value={i.value}>
+                        {i.label}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-1.5">
-                <Label>Alíquota IR</Label>
-                <Select
-                  value={String(taxBracket)}
-                  onValueChange={(v) => setTaxBracket(Number(v))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {TAX_BRACKETS.map((b) => (
-                      <SelectItem key={b.value} value={String(b.value)}>
-                        {b.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              {indexer === "PRE" ? (
+                <div className="space-y-1.5">
+                  <Label>Taxa contratada (% a.a.)</Label>
+                  <Input
+                    type="number"
+                    step={0.01}
+                    value={(taxaPre * 100).toFixed(2)}
+                    onChange={(e) => setTaxaPre((Number(e.target.value) || 0) / 100)}
+                  />
+                </div>
+              ) : null}
+              {indexer === "CDI" ? (
+                <div className="space-y-1.5">
+                  <Label>% CDI contratado</Label>
+                  <Input
+                    type="number"
+                    step={0.1}
+                    value={percentCDI}
+                    onChange={(e) => setPercentCDI(Number(e.target.value) || 0)}
+                  />
+                </div>
+              ) : null}
+              {indexer === "IPCA" ? (
+                <div className="space-y-1.5">
+                  <Label>Cupom real (% a.a.)</Label>
+                  <Input
+                    type="number"
+                    step={0.01}
+                    value={(cupomReal * 100).toFixed(2)}
+                    onChange={(e) =>
+                      setCupomReal((Number(e.target.value) || 0) / 100)
+                    }
+                  />
+                </div>
+              ) : null}
               <div className="space-y-1.5">
                 <Label>Retorno desejado (% a.a.)</Label>
                 <Input
@@ -201,6 +342,35 @@ export function Simulator() {
                 />
               </div>
             </div>
+
+            <div className="rounded-md border border-terminal-border bg-terminal-bg/40 p-3 text-xs space-y-1">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">PU justo (curva + parâmetros)</span>
+                <span className="font-mono tabular-nums">R$ {puJusto.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Δ vs PU de compra</span>
+                <span
+                  className={`font-mono tabular-nums ${
+                    purchasePU < puJusto ? "text-positive" : "text-warning"
+                  }`}
+                >
+                  {(((purchasePU - puJusto) / puJusto) * 100).toFixed(2)}%
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Dias úteis · dias corridos</span>
+                <span className="font-mono tabular-nums">{du}du · {dc}dc</span>
+              </div>
+              {indexer === "IPCA" ? (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">VNA hoje (IPCA {formatPercent(IPCA_ANUAL)})</span>
+                  <span className="font-mono tabular-nums">
+                    R$ {atualizarVNA(VNA_BASE, IPCA_ANUAL, 0).toFixed(2)}
+                  </span>
+                </div>
+              ) : null}
+            </div>
           </CardContent>
         </Card>
 
@@ -208,7 +378,7 @@ export function Simulator() {
           <CardHeader>
             <CardTitle>Comparação vs. Benchmarks</CardTitle>
             <div className="text-xs text-muted-foreground mt-1">
-              Taxa anualizada bruta · base 252 du
+              Yield bruto e líquido confrontados com benchmarks de mercado
             </div>
           </CardHeader>
           <CardContent>
@@ -217,7 +387,11 @@ export function Simulator() {
                 data={ratesComparison}
                 margin={{ top: 16, right: 16, left: 0, bottom: 0 }}
               >
-                <CartesianGrid stroke="hsl(150 18% 14%)" vertical={false} strokeDasharray="2 4" />
+                <CartesianGrid
+                  stroke="hsl(150 18% 14%)"
+                  vertical={false}
+                  strokeDasharray="2 4"
+                />
                 <XAxis
                   dataKey="name"
                   stroke="hsl(140 10% 60%)"
@@ -254,87 +428,64 @@ export function Simulator() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Análise de Preço</CardTitle>
+            <CardTitle>Análise de Preço · Break-even</CardTitle>
             <div className="text-xs text-muted-foreground mt-1">
-              Preço de equilíbrio (break-even) e cenários
+              Preço que iguala CDI no vértice + sensibilidade
             </div>
           </CardHeader>
           <CardContent>
-            <Tabs defaultValue="breakeven">
-              <TabsList>
-                <TabsTrigger value="breakeven">Break-even</TabsTrigger>
-                <TabsTrigger value="scenarios">Cenários</TabsTrigger>
-              </TabsList>
-              <TabsContent value="breakeven" className="space-y-3 text-sm">
-                <div className="rounded-md border border-terminal-border bg-terminal-bg/40 p-4">
-                  <div className="text-xs text-muted-foreground mb-1">
-                    Preço de equilíbrio (PU que iguala CDI)
-                  </div>
-                  <div className="text-2xl font-mono tabular-nums text-foreground">
-                    R$ {result.breakEvenPrice.toFixed(2)}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    Acima disso → operação rende abaixo do CDI · abaixo → bate CDI.
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2 text-xs">
-                  <Pill
-                    label="Comprando 1% abaixo BE"
-                    value={`R$ ${(result.breakEvenPrice * 0.99).toFixed(2)}`}
-                  />
-                  <Pill
-                    label="Break-even"
-                    value={`R$ ${result.breakEvenPrice.toFixed(2)}`}
-                    highlight
-                  />
-                  <Pill
-                    label="Comprando 1% acima BE"
-                    value={`R$ ${(result.breakEvenPrice * 1.01).toFixed(2)}`}
-                  />
-                </div>
-              </TabsContent>
-              <TabsContent value="scenarios" className="space-y-3 text-sm">
-                {[
-                  { label: "PU −2%", factor: 0.98 },
-                  { label: "PU atual", factor: 1.0, highlight: true },
-                  { label: "PU +2%", factor: 1.02 },
-                  { label: "PU +5%", factor: 1.05 },
-                ].map((s) => {
-                  const pu = purchasePU * s.factor;
-                  const sim = runBuyerSimulation({
-                    purchasePU: pu,
-                    faceValue,
-                    maturity,
-                    rate,
-                    indexer,
-                    taxBracket,
-                  });
-                  return (
-                    <div
-                      key={s.label}
-                      className={`flex items-center justify-between rounded-md border px-3 py-2 ${
-                        s.highlight ? "border-primary/40 bg-primary/[0.04]" : "border-terminal-border bg-terminal-bg/40"
-                      }`}
-                    >
-                      <div className="flex flex-col">
-                        <span className="text-xs text-muted-foreground">
-                          {s.label}
-                        </span>
-                        <span className="font-mono tabular-nums">R$ {pu.toFixed(2)}</span>
-                      </div>
-                      <div className="flex flex-col items-end">
-                        <span className="font-mono text-primary tabular-nums">
-                          {formatPercent(sim.annualizedYield)}
-                        </span>
-                        <span className="text-[10px] text-muted-foreground">
-                          {sim.vsCDI.toFixed(2)}x CDI
-                        </span>
-                      </div>
+            <div className="rounded-md border border-terminal-border bg-terminal-bg/40 p-4 mb-3">
+              <div className="text-xs text-muted-foreground mb-1">
+                Preço de equilíbrio (yield bruto = CDI projetado)
+              </div>
+              <div className="text-2xl font-mono tabular-nums text-foreground">
+                R$ {breakEven.toFixed(2)}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                CDI no vértice ({du}du) ≈ {formatPercent(cdiProjetadoPara(du))} ·
+                comprar abaixo de break-even rende acima do CDI.
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+              {[
+                { label: "PU −2%", factor: 0.98 },
+                { label: "PU atual", factor: 1.0, highlight: true },
+                { label: "PU +2%", factor: 1.02 },
+              ].map((s) => {
+                const pu = purchasePU * s.factor;
+                const y =
+                  indexer === "PRE"
+                    ? calcularYieldImplicito_PreFixado(pu, faceValue, du)
+                    : indexer === "CDI"
+                      ? calcularYieldImplicito_CDI(pu, faceValue, du, cdiProjetadoPara(du)).taxaEquivAnual
+                      : calcularYieldImplicito_IPCA(pu, vna, du);
+                const yl = calcularYieldLiquido(y, tipo, dc, perfil, isIncentivada);
+                return (
+                  <div
+                    key={s.label}
+                    className={`rounded-md border p-2 ${
+                      s.highlight
+                        ? "border-primary/40 bg-primary/[0.04]"
+                        : "border-terminal-border bg-terminal-bg/40"
+                    }`}
+                  >
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                      {s.label} · R$ {pu.toFixed(2)}
                     </div>
-                  );
-                })}
-              </TabsContent>
-            </Tabs>
+                    <div className="font-mono tabular-nums mt-1 flex items-baseline gap-1">
+                      <span className="text-foreground">{formatPercent(y)}</span>
+                      <span className="text-[10px] text-muted-foreground">bruto</span>
+                    </div>
+                    <div className="font-mono tabular-nums flex items-baseline gap-1">
+                      <span className={s.highlight ? "text-primary" : "text-positive"}>
+                        {formatPercent(yl)}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">líq</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -347,64 +498,103 @@ export function Simulator() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="rounded-md border border-primary/30 bg-primary/[0.05] p-4 text-center">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-primary">
-                Taxa Anualizada
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-md border border-terminal-border bg-terminal-bg/40 p-3">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Yield Bruto a.a.
+                </div>
+                <div className="text-xl font-mono tabular-nums text-foreground font-semibold mt-1">
+                  {formatPercent(yieldBrutoAnual)}
+                </div>
+                <div className="text-[10px] text-muted-foreground mt-1">
+                  {percentCDIImplicito != null
+                    ? `${percentCDIImplicito.toFixed(1)}% CDI`
+                    : indexer === "IPCA"
+                      ? "juro real"
+                      : "base 252du"}
+                </div>
               </div>
-              <div className="text-4xl font-mono tabular-nums text-primary font-semibold mt-1">
-                {formatPercent(result.annualizedYield)}
+              <div className="rounded-md border border-primary/30 bg-primary/[0.05] p-3">
+                <div className="text-[10px] uppercase tracking-wider text-primary">
+                  Yield Líquido a.a.
+                </div>
+                <div className="text-xl font-mono tabular-nums text-primary font-semibold mt-1">
+                  {formatPercent(yieldLiquidoAnual)}
+                </div>
+                <div className="text-[10px] text-muted-foreground mt-1">
+                  {ir.descricao}
+                </div>
               </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                em {days} dias · {(days / 365).toFixed(2)} anos
-              </div>
-              <div className="mt-3 flex items-center justify-center gap-2">
-                <span
-                  className={`text-xs font-mono px-2 py-0.5 rounded-sm ${
-                    cdiRatio >= 1 ? "bg-positive/15 text-positive" : "bg-destructive/15 text-destructive"
-                  }`}
-                >
-                  {cdiRatio.toFixed(2)}x CDI
-                </span>
-                <span
-                  className={`text-xs font-mono px-2 py-0.5 rounded-sm ${
-                    meetsDesired ? "bg-positive/15 text-positive" : "bg-warning/15 text-warning"
-                  }`}
-                >
-                  {meetsDesired ? "✓ atinge desejado" : "abaixo do desejado"}
-                </span>
-              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-center text-xs">
+              <span
+                className={`font-mono px-2 py-1 rounded-sm ${
+                  vsCDILiquido.percentCDI >= 100
+                    ? "bg-positive/15 text-positive"
+                    : "bg-warning/15 text-warning"
+                }`}
+              >
+                {vsCDILiquido.percentCDI.toFixed(0)}% CDI líq
+              </span>
+              <span
+                className={`font-mono px-2 py-1 rounded-sm ${
+                  spreadBps >= 0
+                    ? "bg-positive/15 text-positive"
+                    : "bg-warning/15 text-warning"
+                }`}
+              >
+                {spreadBps >= 0 ? "+" : ""}
+                {spreadBps.toFixed(0)} bps
+              </span>
+              <span
+                className={`font-mono px-2 py-1 rounded-sm ${
+                  meetsDesired
+                    ? "bg-positive/15 text-positive"
+                    : "bg-destructive/15 text-destructive"
+                }`}
+              >
+                {meetsDesired ? "✓ alvo" : "✗ alvo"}
+              </span>
             </div>
 
             <Separator />
 
             <Row
               icon={<TrendingUp className="h-3.5 w-3.5 text-positive" />}
-              label="Lucro bruto"
-              value={formatCurrency(result.grossReturn, 2)}
+              label="Lucro bruto (1 unid.)"
+              value={formatCurrency(grossProfit, 2)}
               positive
             />
             <Row
               icon={<Percent className="h-3.5 w-3.5 text-warning" />}
-              label={`Imposto de renda (${(taxBracket * 100).toFixed(1)}%)`}
-              value={formatCurrency(result.grossReturn - result.netReturn, 2)}
-              tone="warning"
+              label={ir.isento ? "Tributação" : `IR aplicável (${(ir.ir * 100).toFixed(1)}%)`}
+              value={
+                ir.isento
+                  ? "Isento"
+                  : formatCurrency(grossProfit * ir.ir, 2)
+              }
+              tone={ir.isento ? "positive" : "warning"}
             />
             <Row
               icon={<Equal className="h-3.5 w-3.5 text-primary" />}
-              label="Lucro líquido"
-              value={formatCurrency(result.netReturn, 2)}
-              positive
+              label="Lucro líquido (1 unid.)"
+              value={formatCurrency(netProfit, 2)}
               highlight
             />
             <Separator />
-            <Row label="Investimento inicial" value={formatCurrency(purchasePU, 2)} />
-            <Row label="Valor no vencimento" value={formatCurrency(faceValue, 2)} />
+            <Row label="Investimento" value={formatCurrency(purchasePU, 2)} />
             <Row
-              label="Retorno sobre investimento"
-              value={`${((result.netReturn / purchasePU) * 100).toFixed(2)}%`}
+              label="Valor de resgate"
+              value={formatCurrency(valorResgate, 2)}
+              icon={<Scale className="h-3.5 w-3.5 text-muted-foreground" />}
+            />
+            <Row
+              label="ROI líquido (no período)"
+              value={`${((netProfit / purchasePU) * 100).toFixed(2)}%`}
               positive
             />
-            <Row label="Dias até vencimento" value={`${days}d`} />
+            <Row label="Dias úteis · corridos" value={`${du}du · ${dc}dc`} />
           </CardContent>
         </Card>
 
@@ -414,26 +604,66 @@ export function Simulator() {
           </CardHeader>
           <CardContent className="text-xs space-y-2 text-muted-foreground leading-relaxed">
             <p>
-              Comprando 1 unidade por <span className="text-foreground font-mono">R$ {purchasePU.toFixed(2)}</span>{" "}
-              e recebendo <span className="text-foreground font-mono">R$ {faceValue.toFixed(2)}</span> no vencimento,
-              a taxa implícita anualizada é de{" "}
-              <span className="text-primary font-mono">{formatPercent(result.annualizedYield)}</span>.
+              Comprando 1 unidade por{" "}
+              <span className="text-foreground font-mono">R$ {purchasePU.toFixed(2)}</span>{" "}
+              de um{" "}
+              <span className="text-foreground">
+                {tipo}
+                {isIncentivada ? " incentivado" : ""} {indexer === "PRE" ? "pré-fixado" : indexer === "CDI" ? "%CDI" : "IPCA+"}
+              </span>{" "}
+              com vencimento em {dc} dias, a taxa bruta implícita é{" "}
+              <span className="text-foreground font-mono">{formatPercent(yieldBrutoAnual)}</span>{" "}
+              {percentCDIImplicito != null ? (
+                <>
+                  (≈ <span className="text-foreground font-mono">{percentCDIImplicito.toFixed(1)}%</span> do CDI projetado)
+                </>
+              ) : null}.
             </p>
             <p>
-              Isso representa <span className="text-foreground font-mono">{cdiRatio.toFixed(2)}x</span> o
-              CDI atual de <span className="font-mono">{formatPercent(CDI_ANNUAL)}</span>. Após IR de{" "}
-              <span className="font-mono">{(taxBracket * 100).toFixed(1)}%</span>, o lucro líquido é{" "}
-              <span className="text-positive font-mono">{formatCurrency(result.netReturn, 2)}</span>.
+              Para perfil <span className="text-foreground">{perfil}</span>,
+              {ir.isento ? (
+                <> a operação é <span className="text-positive">isenta</span> de IR (
+                  {asset_type_isento_motivo(tipo, isIncentivada)})
+                  e o yield líquido é igual ao bruto:{" "}
+                  <span className="text-primary font-mono">{formatPercent(yieldLiquidoAnual)}</span>.
+                </>
+              ) : (
+                <> aplica-se IR de{" "}
+                  <span className="text-foreground font-mono">{(ir.ir * 100).toFixed(1)}%</span>
+                  {" "}sobre os rendimentos, levando o yield líquido a{" "}
+                  <span className="text-primary font-mono">{formatPercent(yieldLiquidoAnual)}</span>.
+                </>
+              )}
             </p>
             <p>
-              Preço de equilíbrio (paridade com CDI) ={" "}
-              <span className="text-foreground font-mono">R$ {result.breakEvenPrice.toFixed(2)}</span>.
+              Isso equivale a{" "}
+              <span className="text-foreground font-mono">{vsCDILiquido.percentCDI.toFixed(1)}%</span>{" "}
+              do CDI projetado (bruto:{" "}
+              <span className="font-mono">{vsCDIBruto.percentCDI.toFixed(1)}%</span>)
+              e a um spread de{" "}
+              <span className={spreadBps >= 0 ? "text-positive font-mono" : "text-warning font-mono"}>
+                {spreadBps >= 0 ? "+" : ""}{spreadBps.toFixed(0)} bps
+              </span>{" "}
+              sobre a curva {fonteCurva === "ANBIMA" ? "ANBIMA" : "DI · B3"} no vértice.
+            </p>
+            <p>
+              Lucro líquido total estimado:{" "}
+              <span className="text-positive font-mono">{formatCurrency(netProfit, 2)}</span> por unidade.
+              Preço de equilíbrio (paridade CDI) ={" "}
+              <span className="text-foreground font-mono">R$ {breakEven.toFixed(2)}</span>.
             </p>
           </CardContent>
         </Card>
       </div>
     </div>
   );
+}
+
+function asset_type_isento_motivo(tipo: AssetType, isIncentivada: boolean): string {
+  if (tipo === "Debênture" && isIncentivada) return "Lei 12.431 · debênture incentivada";
+  if (tipo === "LCI" || tipo === "LCA") return `${tipo} · isento PF`;
+  if (tipo === "CRI" || tipo === "CRA") return `${tipo} · isento PF`;
+  return "isento";
 }
 
 function Row({
@@ -447,7 +677,7 @@ function Row({
   icon?: React.ReactNode;
   label: string;
   value: string;
-  tone?: "warning";
+  tone?: "warning" | "positive";
   positive?: boolean;
   highlight?: boolean;
 }) {
@@ -463,40 +693,13 @@ function Row({
             ? "text-primary font-semibold text-base"
             : tone === "warning"
               ? "text-warning"
-              : positive
+              : tone === "positive" || positive
                 ? "text-positive"
                 : ""
         }`}
       >
         {value}
       </span>
-    </div>
-  );
-}
-
-function Pill({
-  label,
-  value,
-  highlight,
-}: {
-  label: string;
-  value: string;
-  highlight?: boolean;
-}) {
-  return (
-    <div
-      className={`rounded-md border px-2 py-2 text-center ${
-        highlight
-          ? "border-primary/40 bg-primary/[0.05]"
-          : "border-terminal-border bg-terminal-bg/40"
-      }`}
-    >
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <div className={`font-mono tabular-nums mt-1 ${highlight ? "text-primary font-semibold" : ""}`}>
-        {value}
-      </div>
     </div>
   );
 }
